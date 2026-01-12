@@ -1,0 +1,19 @@
+// 以下采用陈元哲同学的方法
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug",
+            "type": "cppdbg",
+            "request": "launch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "program": "${workspaceFolder}/targets/objs/kernel.exe",
+            "args": [],
+            //"stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "preLaunchTask": "OOS run", // 前置任务：启动Bochs
+        }
+    ]
+}

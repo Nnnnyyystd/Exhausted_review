@@ -1,0 +1,44 @@
+{
+    "tasks": [
+        { // 生成任务, 使用 Ctrl + Alt + B 编译
+            "type": "shell",
+            "label": "OOS make",
+            "command": "make",
+            "args": [
+                "all",
+                "-C",
+                "${workspaceFolder}/src"
+            ],
+            "detail": "调用Make编译OOS",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "type": "shell",
+            "label": "OOS run",
+            "command": "bochs.exe",
+            "args": [
+                "-q",
+                "-f",
+                "${workspaceFolder}\\targets\\UNIXV6++\\bochsrc.bxrc",
+                "-noconsole" // 停用命令行输出，退出时不用再按enter
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}\\targets\\UNIXV6++\\",
+                "env": {
+                    "BXSHARE": "E:\\Project\\unix v6++\\Bochs-2.6", // !!! 请修改为 : Bochs所在位置 !!!
+                    "Path": "${env:Path};E:\\Project\\unix v6++\\Bochs-2.6\\" // !!! 请修改为 : Bochs所在位置, 注意别把${env:Path};删了 !!!
+                }
+            },
+            "detail": "运行OOS",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "isBackground": true // 作为后台任务, 避免堵塞gdb
+        },
+    ],
+    "version": "2.0.0"
+}

@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+    {
+        "name": "gdb Remote Launch for oos",
+        "type": "cppdbg",
+        "request": "launch",
+        "miDebuggerServerAddress": "localhost:1234",
+        "program": "C:/Users/Public/Unix_v6pp/oos/targets/objs/kernel.exe",
+        "miDebuggerPath": "gdb",
+        "setupCommands": [
+            {
+                "text": "set substitute-path 'c:/Users/86159/unix v6++' C:/Users/Public/Unix_v6pp",
+                "ignoreFailures": false
+            }
+        ],
+        "args": [],
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "environment": [],
+        "externalConsole": false,
+        "MIMode": "gdb"
+    }
+    ]
+}
