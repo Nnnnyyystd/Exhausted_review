@@ -1,0 +1,54 @@
+1. 物理内存现在按页框管理
+1.1 基于位图的分配
+改造的第一步是把物理内存如何分配从原先偏向连续区域管理的方式，改成真正按页框离散管理的方式。核心新增结构是BitMap和BitMapAllocator。
+在MapNode.h中，BitMap保存了一个物理内存池的基本描述信息：m_AddressIdx：该内存池的物理起始地址、rows：位图有效行数、map[]：位图数组本身，每一位对应一个页框的占用状态
+[IMAGE] figures/page_report/word_image_01.png
+这意味着，从这里开始，系统已经不再把用户物理内存只看成一个大块空间，而是把它拆成一个个 4 KB 页框去管理。
+Allocator.h和Allocator.cpp中，新引入的BitMapAllocator提供了两类关键操作：Alloc(BitMap &bitmap, unsigned long size)、Free(BitMap &bitmap, unsigned long size, unsigned long addrIdx)
+Alloc()会先把字节数换算成页数，然后在位图中顺序扫描，寻找一段足够长的连续空闲页框；一旦找到，就把对应位全部置1，并返回这段页框对应的物理起始地址。Free()则执行相反操作：根据物理地址和大小定位到对应页框，把这些位清零。
+[IMAGE] figures/page_report/word_image_02.png
+1.2 PageManager现在在页级别工作
+在页框分配器引入之后，内核中的页管理器也被同步改造。现在的PageManager不再只是简单包装旧的空闲区分配逻辑，而是显式持有页框位图和页引用计数，两个关键成员是：
+BitMap bitmap;int Page[MemoryDescriptor::USER_SPACE_SIZE / PAGE_SIZE]分别承担两个不同层次的职责：bitmap负责回答某个物理页框是否已被占用；Page[]负责回答某个物理页框当前被引用了多少次。这两个信息必须同时存在，因为分页系统里“是否占用”和“是否还能释放”并不是同一个问题。一个页框即使已经被占用，也可能正被多个地址空间共同引用；这时不能仅仅因为某一个进程释放了它，就立刻把它归还给分配器。Page[]就是在为这种共享页做准备。
+在PageManager.cpp中：AllocMemory()直接调用BitMapAllocator::Alloc()获得页框，并把对应页的引用计数初始化为1；FreeMemory()先把对应页的引用计数减1只有当引用计数减到0时，才真正调用BitMapAllocator::Free()回收该页框，这说明系统对页的认识已经是分页系统语义下的认识，而不是早期谁申请谁释放的粗粒度内存块语义。也正因为如此，之后在fork()中把父子页映射成同一物理页框，再通过只读保护和引用计数实现延迟复制，才成为可能。
+2. 每个进程现在都拥有自己的页表状态
+2.1 每个进程拥有自己的页目录
+原先系统的地址空间管理更偏向系统维护一份运行中的用户页表，再把当前进程的映射写进去。这次改造后，一个非常关键的变化是：页目录已经成为进程自身状态的一部分。
+在Process.hProcess 新增了：PageDirectory *pPageDirectory;
+unsigned long GetPageDirectoryPhyAddr();
+[IMAGE] figures/page_report/word_image_03.png
+[IMAGE] figures/page_report/word_image_04.png
+这表示每个进程现在不仅有p_addr、p_size、p_textp这些传统进程镜像信息，还额外拥有一份属于自己的页目录。
+其中GetPageDirectoryPhyAddr()的作用非常关键。因为内核中通常保存的是页目录在内核高地址空间中的线性地址，而CPU在切换地址空间时要求CR3中装入的是页目录的物理地址，所以这里必须做一次从内核线性地址到物理地址的转换。
+2.2 每个进程拥有私有用户页表
+除了页目录之外，进程的用户页表组织方式也发生了变化，在旧代码里，MemoryDescriptor的意义接近相对映射描述符，系统会在运行时把这些描述符翻译并写进统一的用户页表。而现在，MemoryDescriptor::Initialize()做的事情是为当前进程分配一张真正的私有用户页表。
+[IMAGE] figures/page_report/word_image_05.png
+这里有两个设计信号非常明确：只分配一张页表，而不是一次性构造整套全局用户页表。这张页表保存在进程自己的MemoryDescriptor里，而不是共享于所有进程。因此，现在的结构可以理解为：用户页表 0：系统保留的公共页表，用于公共低端映射，用户页表 1：当前进程私有的用户页表，用于该进程自己的正文段、数据段、堆和栈
+同时，MapToPageTable()也被改造了。它不再做“把相对地址映射复制到系统当前页表”的工作，而是直接通过：FlushPageDirectory(u.u_procp->GetPageDirectoryPhyAddr());告诉 CPU当前进程已经准备好了自己的页目录和页表，直接切到这一套地址空间，这意味着，页表内容已经作为进程状态持久存在，而不是临时拷贝到某个共享结构里。
+3.页目录是如何构建的
+ProcessManager新增了两个辅助函数：AllocPageDirectory()、InitProcPageDirectory(Process *proc, PageTable *privateUsrPageTable)，AllocPageDirectory() 的职责很直接：从内核页池中给新进程分配一个页目录页。这样每个进程都有独立的页目录物理页，不会互相覆盖。InitProcPageDirectory()则负责把一份页目录真正组织起来。它会填三个关键入口：第 0 项：指向共享的 0 号用户页表；内核高地址对应项：指向内核页表；第 1 项：指向该进程自己的私有用户页表；
+[IMAGE] figures/page_report/word_image_06.png
+所以现在每个进程的地址空间实际上是共享映射 + 私有映射的拼接体，而不再是一套完全全局共享的用户映射。这正是多进程分页系统应有的基本结构。
+4. 上下文切换也会切换地址空间
+分页系统是否真正成立，关键不只是页表有没有建出来，而是“进程切换时CPU是否真的切到了另一套页表。这次修改中，FlushPageDirectory被改成了参数化宏：
+[IMAGE] figures/page_report/word_image_07.png
+这非常关键。因为在原有思路里，CR3是固定写死到某个页目录而现在，CR3明确由当前进程动态决定。
+与此同时，在ProcessManager.h中，SwtchUStruct(p)也被改造为两步：更新 PPDA 对应的内核页表项；把p->GetPageDirectoryPhyAddr()装入CR3
+这说明现在的上下文切换已经不是单纯的寄存器切换或内核栈切换，而是包含完整地址空间切换的。也就是说，调度器选中不同进程时，CPU会真正改用不同的页目录，从而使用不同的用户页表。这一步是整个设计成立的硬件落地点。没有这一步，前面所有per-process page table的结构都只是静态数据；有了这一步，它们才真正变成活跃地址空间。
+5.内核辅助逻辑也必须同步修改
+5.1 Utility::CopySeg
+CopySeg()现在的实现说明，哪怕只是“复制一页内容”，系统也不再假设这页天然在某个连续线性区域里，而是必须通过页表临时建立映射后再复制。其步骤是：
+从内核页表中临时借两个表项；把源页和目标页映射到内核虚拟地址空间；刷新当前进程页目录；在内核线性地址下执行复制；恢复原来的映射并再次刷新
+[IMAGE] figures/page_report/word_image_08.png
+5.2 Machine
+Machine层新增的：InitKernelPageTable()；InitZeroUserPageTable()
+以及EnablePageProtection()中显式向CR3写入页目录物理地址，都说明底层分页启动路径已经围绕“页目录可切换、页表可独立存在”的设计进行了同步调整。
+也就是说，这次修改不是只动了上层进程管理代码，而是从分页数据结构、分页切换，到内核启动路径都统一到了同一个模型里。
+6. pageDemo如何验证结果
+pageDemo会打印：main1的地址、全局变量 g_data 的地址、栈变量地址、多个malloc()分配得到的堆地址、sbrk(0)返回的当前堆尾地址。这些信息共同说明：代码段、数据段、堆和栈并不是靠“一个连续大块”来理解的，而是落在不同逻辑页中，各自通过页表映射到物理页框。
+程序随后执行 fork()，并在父子进程中分别打印和修改相同变量。最终如果看到：父子进程中的虚拟地址完全相同。子进程修改后，父进程依旧看到旧值，就可以说明：（1）父子进程的虚拟地址布局是同构的（2）它们底层依赖的是不同页表状态和物理页框映射，因此写入被隔离，这正是当前页表设计成功的直接运行时证据。
+[IMAGE] figures/page_report/word_image_09.png
+[IMAGE] figures/page_report/word_image_10.png
+从第一部分地址分布可以看到，代码段main1位于页0x401，全局变量g_data位于页 0x404，栈在最高页附近 0x7ff，堆从0x407、0x408一直增长到brk = 0x40a000。这说明用户地址空间已经不是“整段连续搬移”的旧模型，而是按页组织：代码、数据、堆、栈分别落在不同逻辑页上，堆还能逐页扩张，这与我们现在“页为单位建立映射”的设计一致。
+更关键的是fork之后的结果。子进程和父进程看到的 g_data 地址都是0x4040f4，heap_b地址都是0x407038，说明父子进程共享同一套用户虚拟地址布局；但子进程把 g_data 改成 cafebabe、把heap_b改成badc0de之后，父进程再次读取时仍然是原值 12345678和 22222222。这说明页表隔离是成立的：虽然虚拟地址相同，但父子进程最终访问的是不同的物理页，写操作没有互相污染。
+中间调试信息也进一步印证了这一点：Process PT和System PT显示的是同一批逻辑页号对应到不同物理页框号，说明当前进程的用户页表内容已经被正确装入和切换，用户态地址到物理页框的映射关系确实由页表控制，而不是简单依赖一整块连续物理内存。

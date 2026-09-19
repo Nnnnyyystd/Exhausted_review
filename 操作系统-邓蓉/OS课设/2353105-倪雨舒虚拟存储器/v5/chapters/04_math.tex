@@ -1,0 +1,94 @@
+\chapter{进程生命周期中的页表维护}\label{chap:lifecycle}
+
+\section{fork：相同虚拟地址，不同物理语义}
+
+\texttt{fork()} 是最能体现这次设计变化的路径。创建子进程时，系统会为子进程申请自己的私有页表和页目录，再把父进程页表内容复制过去。为了给写时复制做准备，父进程中原本可写的页会先被改成只读，并增加物理页框引用计数。
+
+\begin{lstlisting}[language=C++,caption={fork 前把可写页改为共享只读页},label={lst:modify-page-table}]
+void ProcessManager::ModifyPageTable(UserPageManager &userPageManager,
+                                      PageTable *pgTable) {
+    for (unsigned int j = 0; j < PageTable::ENTRY_CNT_PER_PAGETABLE; j++) {
+        if (pgTable->m_Entrys[j].m_Present &&
+            pgTable->m_Entrys[j].m_ReadWriter) {
+            pgTable->m_Entrys[j].m_ReadWriter = 0;
+            userPageManager.Page[
+                pgTable->m_Entrys[j].m_PageBaseAddress]++;
+        }
+    }
+}
+\end{lstlisting}
+
+这一步的意义是让父子进程先共享同一个物理页框，但不能直接写。后续如果发生写入，就可以根据缺页异常和引用计数分配新页，实现“虚拟地址相同，但物理页隔离”的效果。即使当前实现还没有把写时复制链路全部做得很完整，结构上已经具备了这个方向。
+
+\section{exec：重新按页装入进程镜像}
+
+\texttt{exec()} 不再适合用“扩展一整块进程镜像，然后整体搬移”的方式理解。现在的做法是根据可执行文件信息，分别为正文段、数据段和栈分配页框，然后把这些物理页框写入当前进程的私有用户页表。
+
+这里的重点不是某一段具体代码，而是控制流发生了变化：装入程序时，内核不再只关心一段连续物理内存的起点和长度，而是逐页建立“虚拟页号到物理页框号”的关系。之后只要刷新当前进程页目录，新的用户态地址空间就生效了。
+
+\section{brk 和栈增长}
+
+堆和栈是运行过程中会继续变化的区域，因此它们也必须按页更新。栈增长时，系统会在栈方向多申请一页，设置对应的页表项，然后刷新页目录。
+
+\begin{lstlisting}[language=C++,caption={栈增长时补充一个页表项},label={lst:sstack}]
+void Process::SStack() {
+    User &u = Kernel::Instance().GetUser();
+    UserPageManager &userPgMgr = Kernel::Instance().GetUserPageManager();
+    MemoryDescriptor &md = u.u_MemoryDescriptor;
+    PageTableEntry *entrys = (PageTableEntry *)md.m_UserPageTableArray;
+
+    unsigned int index = 1024 - (md.m_StackSize >> 12) - 1;
+    md.m_StackSize += 4096;
+
+    unsigned int phyFrame = userPgMgr.AllocMemory(4096);
+    entrys[index].m_Present = 1;
+    entrys[index].m_UserSupervisor = 1;
+    entrys[index].m_ReadWriter = 1;
+    entrys[index].m_PageBaseAddress = phyFrame >> 12;
+
+    md.MapToPageTable();
+}
+\end{lstlisting}
+
+\texttt{brk()} 的处理也类似。堆扩张时为新增虚拟页分配物理页框并填入页表项；堆收缩时则清除页表项并释放对应页框。这样堆尾地址移动时，不再意味着一整段连续内存被搬动，而是页表项发生了变化。
+
+\section{exit：退出时逐页回收}
+
+进程退出时同样不能只释放一整块进程镜像。当前实现会遍历数据段和栈相关的页表项，逐页调用 \texttt{FreeMemory()}，再清掉页表项，最后释放私有用户页表本身。
+
+这和前面的引用计数逻辑是配套的：如果某个物理页框只被这个进程引用，它会被真正归还给位图分配器；如果它还被别的进程共享，就只减少引用计数，不会提前释放。
+
+\section{内核复制页也要经过页表}
+
+连 \texttt{Utility::CopySeg()} 这样的辅助函数也同步改造了。它不再假设要复制的页天然在某个连续线性地址里，而是临时借用内核页表中的两个表项，把源页和目标页映射进内核虚拟空间，然后执行一页大小的复制。
+
+\begin{lstlisting}[language=C++,caption={通过临时内核映射复制一页},label={lst:copyseg}]
+void Utility::CopySeg(unsigned long src, unsigned long des) {
+    User &u = Kernel::Instance().GetUser();
+    Process *current = u.u_procp;
+    PageTableEntry *pt = Machine::Instance().GetKernelPageTable().m_Entrys;
+
+    unsigned long oriEntry1 = pt[borrowedPTE].m_PageBaseAddress;
+    unsigned long oriEntry2 = pt[borrowedPTE + 1].m_PageBaseAddress;
+
+    pt[borrowedPTE].m_PageBaseAddress = src / PageManager::PAGE_SIZE;
+    pt[borrowedPTE + 1].m_PageBaseAddress = des / PageManager::PAGE_SIZE;
+    FlushPageDirectory(current->GetPageDirectoryPhyAddr());
+
+    unsigned char *srcVirtual = (unsigned char *)
+        (Machine::KERNEL_SPACE_START_ADDRESS
+        + borrowedPTE * PageManager::PAGE_SIZE);
+    unsigned char *desVirtual = (unsigned char *)
+        (Machine::KERNEL_SPACE_START_ADDRESS
+        + (borrowedPTE + 1) * PageManager::PAGE_SIZE);
+    Utility::MemCopy((unsigned long)srcVirtual,
+                     (unsigned long)desVirtual,
+                     PageManager::PAGE_SIZE);
+
+    pt[borrowedPTE].m_PageBaseAddress = oriEntry1;
+    pt[borrowedPTE + 1].m_PageBaseAddress = oriEntry2;
+    FlushPageDirectory(current->GetPageDirectoryPhyAddr());
+}
+\end{lstlisting}
+
+这个修改说明分页模型已经不只是进程管理层的概念，连内核内部复制页内容时也必须显式处理页表映射。

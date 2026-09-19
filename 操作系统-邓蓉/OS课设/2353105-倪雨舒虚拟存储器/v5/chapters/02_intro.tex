@@ -1,0 +1,84 @@
+\chapter{物理内存按页框管理}\label{chap:page-frame}
+
+\section{位图分配器}
+
+改造的第一步是把物理内存的管理单位落到页框上。新增的 \texttt{BitMap} 保存一个页框池的起始地址、位图行数和位图数组，每一位对应一个 4KB 页框的占用状态。
+
+\begin{lstlisting}[language=C++,caption={页框位图的核心结构},label={lst:bitmap}]
+class BitMap {
+public:
+    unsigned long m_AddressIdx;
+    int rows;
+    unsigned long long int map[256];
+
+    void set(unsigned long startAddr, unsigned long page_num) {
+        m_AddressIdx = startAddr;
+        rows = page_num / 64;
+        for (int i = 0; i < rows; i++) {
+            map[i] = 0;
+        }
+    }
+};
+\end{lstlisting}
+
+\texttt{BitMapAllocator} 的分配逻辑也比较直接：先把申请大小向上取整成页数，再扫描位图寻找一段足够长的空闲页框，找到后把对应的位设置为 1。释放时则根据物理地址反推页框下标，再把对应位清零。
+
+\begin{lstlisting}[language=C++,caption={按页框扫描和标记空闲位图},label={lst:bitmap-alloc}]
+unsigned long BitMapAllocator::Alloc(BitMap &bitmap, unsigned long size) {
+    int pages_needed = (size + M_PAGE_SIZE - 1) / M_PAGE_SIZE;
+    int start = -1, count = 0;
+
+    for (int i = 0; i < bitmap.rows * 64; i++) {
+        if (is_free(bitmap, i)) {
+            if (count == 0) start = i;
+            if (++count == pages_needed) break;
+        } else {
+            count = 0;
+        }
+    }
+
+    if (count < pages_needed) return 0;
+    for (int i = 0; i < pages_needed; i++) {
+        set_bit(bitmap, start + i, 1);
+    }
+    return start * M_PAGE_SIZE + bitmap.m_AddressIdx;
+}
+\end{lstlisting}
+
+从这里开始，系统不再把用户物理空间只看成一整块连续内存，而是把它拆成很多页框去分配。这个变化看起来不大，但后面所有“同一个虚拟地址可以映射到不同物理页”的能力，都依赖这一步。
+
+\section{PageManager 的引用计数}
+
+\texttt{PageManager} 在位图之上又加了一层页引用计数。位图回答“这个页框有没有被占用”，而 \texttt{Page[]} 回答“这个页框现在被多少地方引用”。这两个问题不能混在一起，因为父子进程共享页时，一个页框虽然已占用，但不能因为某一个进程退出就立刻回收。
+
+\begin{lstlisting}[language=C++,caption={PageManager 中的页框状态},label={lst:page-manager}]
+class PageManager {
+public:
+    BitMap bitmap;
+    int Page[MemoryDescriptor::USER_SPACE_SIZE / PAGE_SIZE];
+
+    unsigned long AllocMemory(unsigned long size);
+    unsigned long FreeMemory(unsigned long size, unsigned long startAddress);
+};
+\end{lstlisting}
+
+实际分配和释放时，\texttt{AllocMemory()} 通过位图分配器拿到物理页框，并把引用计数初始化为 1；\texttt{FreeMemory()} 则先递减引用计数，只有引用计数归零时才真正清空位图。
+
+\begin{lstlisting}[language=C++,caption={分配和释放时维护页引用计数},label={lst:page-ref}]
+unsigned long PageManager::AllocMemory(unsigned long size) {
+    unsigned long newaddr = this->m_pAllocator->Alloc(this->bitmap, size);
+    Page[newaddr >> 12] = 1;
+    return newaddr;
+}
+
+unsigned long PageManager::FreeMemory(unsigned long size,
+                                      unsigned long startAddress) {
+    Page[startAddress >> 12]--;
+    if (Page[startAddress >> 12] == 0) {
+        this->m_pAllocator->Free(this->bitmap, size, startAddress);
+    }
+    return 1;
+}
+\end{lstlisting}
+
+这样处理以后，页框的生命周期就清楚了：申请时变成被占用，复制或共享时增加引用，最后一个引用释放时才真正归还给分配器。这也为 \texttt{fork()} 中的共享页和写时复制语义打好了基础。

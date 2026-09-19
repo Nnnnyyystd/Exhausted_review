@@ -1,0 +1,102 @@
+\chapter{进程私有页表与地址空间切换}\label{chap:process-page-table}
+
+\section{页目录成为进程状态}
+
+原来的地址空间管理更像是维护一份“当前正在使用的用户页表”，不同进程运行时再把自己的映射写进去。这次修改后，页目录被放进了 \texttt{Process} 结构，每个进程都保存自己的页目录指针。
+
+\begin{lstlisting}[language=C++,caption={进程保存自己的页目录},label={lst:process-pgd}]
+class Process {
+public:
+    unsigned long GetPageDirectoryPhyAddr();
+    PageDirectory *pPageDirectory;
+};
+
+unsigned long Process::GetPageDirectoryPhyAddr() {
+    return (unsigned long)(this->pPageDirectory)
+           - Machine::KERNEL_SPACE_START_ADDRESS;
+}
+\end{lstlisting}
+
+这里有一个容易出错的地方：内核里保存的是页目录在高地址空间中的线性地址，而写入 \texttt{CR3} 的必须是物理地址，所以 \texttt{GetPageDirectoryPhyAddr()} 需要减去 \texttt{KERNEL\_SPACE\_START\_ADDRESS}。如果这里直接把内核线性地址写进 \texttt{CR3}，页表切换就不会按预期工作。
+
+\section{每个进程只维护自己的私有用户页表}
+
+\texttt{MemoryDescriptor::Initialize()} 现在只为当前进程申请一张私有用户页表，不再一次性构造全局用户页表数组。这样，进程自己的正文段、数据段、堆和栈都可以写进这张私有页表。
+
+\begin{lstlisting}[language=C++,caption={为进程分配私有用户页表},label={lst:private-pt}]
+void MemoryDescriptor::Initialize() {
+    KernelPageManager &kernelPageManager =
+        Kernel::Instance().GetKernelPageManager();
+
+    this->m_UserPageTableArray =
+        (PageTable *)(kernelPageManager.AllocMemory(sizeof(PageTable))
+        + Machine::KERNEL_SPACE_START_ADDRESS);
+}
+
+void MemoryDescriptor::MapToPageTable() {
+    User &u = Kernel::Instance().GetUser();
+    if (u.u_MemoryDescriptor.m_UserPageTableArray == NULL) return;
+    FlushPageDirectory(u.u_procp->GetPageDirectoryPhyAddr());
+}
+\end{lstlisting}
+
+\texttt{MapToPageTable()} 的含义也随之改变了。它不再负责把映射复制到一张公共运行时页表里，而是刷新当前进程自己的页目录。也就是说，页表内容已经作为进程状态保存好了，CPU 只需要切到这份页目录即可。
+
+\section{页目录的三类入口}
+
+进程页目录由 \texttt{AllocPageDirectory()} 和 \texttt{InitProcPageDirectory()} 共同完成。前者从内核页池中申请一个页目录页，后者填入三个关键入口：第 0 项指向公共 0 号用户页表，内核高地址项指向内核页表，第 1 项指向当前进程的私有用户页表。
+
+\begin{lstlisting}[language=C++,caption={进程页目录的关键入口},label={lst:init-pgd}]
+PageDirectory *ProcessManager::AllocPageDirectory() {
+    KernelPageManager &kernelPageManager =
+        Kernel::Instance().GetKernelPageManager();
+    return (PageDirectory *)(kernelPageManager.AllocMemory(
+        sizeof(PageDirectory)) + Machine::KERNEL_SPACE_START_ADDRESS);
+}
+
+void ProcessManager::InitProcPageDirectory(Process *proc,
+                                           PageTable *privateUsrPageTable) {
+    PageDirectory *pd = proc->pPageDirectory;
+
+    pd->m_Entrys[0].m_Present = 1;
+    pd->m_Entrys[0].m_ReadWriter = 1;
+    pd->m_Entrys[0].m_UserSupervisor = 1;
+    pd->m_Entrys[0].m_PageTableBaseAddress =
+        Machine::USER_PAGE_TABLE_BASE_ADDRESS >> 12;
+
+    unsigned int kidx =
+        Machine::KERNEL_SPACE_START_ADDRESS / PageTable::SIZE_PER_PAGETABLE_MAP;
+    pd->m_Entrys[kidx].m_Present = 1;
+    pd->m_Entrys[kidx].m_ReadWriter = 1;
+    pd->m_Entrys[kidx].m_UserSupervisor = 0;
+    pd->m_Entrys[kidx].m_PageTableBaseAddress =
+        Machine::KERNEL_PAGE_TABLE_BASE_ADDRESS >> 12;
+
+    unsigned long frame =
+        ((unsigned long)privateUsrPageTable
+        - Machine::KERNEL_SPACE_START_ADDRESS) >> 12;
+    pd->m_Entrys[1].m_PageTableBaseAddress = frame;
+    pd->m_Entrys[1].m_Present = 1;
+    pd->m_Entrys[1].m_ReadWriter = 1;
+    pd->m_Entrys[1].m_UserSupervisor = 1;
+}
+\end{lstlisting}
+
+这个结构可以理解为“公共映射 + 内核映射 + 进程私有映射”。公共和内核部分保持共享，进程真正变化的部分放在自己的 1 号用户页表里。
+
+\section{上下文切换时刷新 CR3}
+
+分页系统是否真正成立，关键不只是页目录有没有建出来，还要看进程切换时 CPU 是否真的切到了另一套页目录。本次修改把 \texttt{FlushPageDirectory} 改成了带参数的宏，调用时传入当前进程页目录的物理地址。
+
+\begin{lstlisting}[language=C++,caption={动态刷新 CR3},label={lst:flush-cr3}]
+#define FlushPageDirectory(pgTable) \
+    __asm__ __volatile__(" movl %0, %%cr3" : : "r"(pgTable));
+
+#define SwtchUStruct(p) \
+    Machine::Instance().GetKernelPageTable() \
+        .m_Entrys[Kernel::USER_PAGE_INDEX].m_PageBaseAddress = \
+            (p)->p_addr >> 12; \
+    FlushPageDirectory((p)->GetPageDirectoryPhyAddr());
+\end{lstlisting}
+
+这样，调度器选中不同进程时，不只是恢复寄存器和内核栈，也会同步切换页目录。没有这一步，前面所有“每个进程一份页表”的结构都只是静态数据；有了这一步，它们才真正变成运行时地址空间。

@@ -1,0 +1,519 @@
+name: Create Release
+
+# Prevent concurrent release generation
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [master, dev]
+    paths:
+      - "style/**"
+      - "figures/**"
+      - ".github/workflows/release.yml"
+      - "package.json"
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"  # Full semver tags only (exclude floating vX.Y tags)
+  pull_request:
+    branches: [master, dev]
+    paths:
+      - "style/**"
+      - "figures/**"
+      - ".github/workflows/release.yml"
+      - "package.json"
+  workflow_run:
+    workflows: ["test"]
+    types: [completed]
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  # Build CTAN package and source archives (runs on every trigger)
+  package:
+    if: |
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract package metadata
+        id: metadata
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+          AUTHOR=$(jq -r '.author // "TJ-CSCCG"' package.json)
+          YEAR=$(date +%Y)
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "author=$AUTHOR" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "PACKAGE_VERSION=$VERSION"
+            echo "PACKAGE_AUTHOR=$AUTHOR"
+            echo "CURRENT_YEAR=$YEAR"
+          } >> "$GITHUB_ENV"
+
+          echo "Package version: $VERSION, author: $AUTHOR"
+
+      - name: Validate source files
+        run: |
+          for f in style/tongjithesis.cls style/tongjithesis.cfg figures/tongji.pdf figures/tongji-header.pdf; do
+            [ -f "$f" ] || { echo "Error: $f not found"; exit 1; }
+          done
+          echo "All required source files present"
+
+      - name: Build CTAN package
+        run: |
+          mkdir -p ctan/tongjithesis/example/figures
+
+          # Copy class files
+          cp style/tongjithesis.cls style/tongjithesis.cfg ctan/tongjithesis/
+          cp figures/tongji.pdf figures/tongji-header.pdf ctan/tongjithesis/example/figures/
+
+          # Generate LICENSE
+          cat > ctan/tongjithesis/LICENSE << HEREDOC
+          Copyright (C) 2022-${CURRENT_YEAR} TJ-CSCCG
+
+          This work may be distributed and/or modified under the
+          conditions of the LaTeX Project Public License, either version 1.3
+          of this license or (at your option) any later version.
+          The latest version of this license is in
+            http://www.latex-project.org/lppl.txt
+          and version 1.3 or later is part of all distributions of LaTeX
+          version 2003/12/01 or later.
+
+          This work has the LPPL maintenance status "maintained".
+
+          The Current Maintainer of this work is ${PACKAGE_AUTHOR}.
+
+          This work consists of the files:
+          - tongjithesis.cls (main class file)
+          - tongjithesis.cfg (configuration file)
+          - README.md (documentation)
+          - example/ (example files)
+          HEREDOC
+
+          # Generate README
+          cat > ctan/tongjithesis/README.md << 'HEREDOC'
+          # Tongji University Undergraduate Thesis Template
+
+          ## Overview
+
+          `tongjithesis` is a LaTeX class for creating undergraduate theses that comply with the official requirements of Tongji University, China. This template is designed to help students focus on content creation rather than formatting details.
+
+          ## Features
+
+          - Compliant with Tongji University's official undergraduate thesis requirements
+          - Support for both one-sided and two-sided printing
+          - Comprehensive formatting for title page, abstract, table of contents, chapters, etc.
+          - Customized citation styles that comply with Chinese GB/T 7714-2015 standard
+          - Support for code listings with syntax highlighting (minted or listings)
+          - Integration of mathematical formulas, figures, tables, and algorithms
+
+          ## Requirements
+
+          - A complete TeX distribution (TeX Live 2026+, MiKTeX, or MacTeX)
+          - XeLaTeX or LuaLaTeX engine (the template doesn't support pdfLaTeX)
+          - Python with Pygments installed (optional, for minted code highlighting)
+
+          ## Installation
+
+          1. **Manual Installation**:
+             - Copy `tongjithesis.cls` and `tongjithesis.cfg` to your project directory, or
+             - Install to your local texmf tree (recommended)
+
+          2. **Install to TEXMF tree**:
+             - For TeX Live on Unix-like systems: `~/texmf/tex/latex/tongjithesis/`
+             - For MiKTeX on Windows: `%USERPROFILE%\texmf\tex\latex\tongjithesis\`
+             - For MacTeX: `~/Library/texmf/tex/latex/tongjithesis/`
+
+          ## Basic Usage
+
+          ```latex
+          \documentclass[oneside]{tongjithesis}  % Use 'twoside' for double-sided printing
+
+          \tjbibresource{references.bib}
+
+          \school{计算机科学与技术学院}
+          \major{计算机科学与技术}
+          \student{1234567}{张三}
+          \thesistitle{论文标题}{——副标题}
+          \thesistitleeng{Thesis Title}{--- Subtitle}
+          \thesisadvisor{李四 教授}
+          \thesisdate{2026}{6}{1}
+
+          \begin{document}
+          \MakeCover
+          \cleardoublepage
+
+          \frontmatter
+          \MakeAbstract{摘要内容}{关键词1，关键词2}
+          \MakeAbstractEng{Abstract content}{Keyword1, Keyword2}
+          \clearpage
+          \tableofcontents
+          \cleardoublepage
+
+          \mainmatter
+          \chapter{引言}
+          % ... your content ...
+
+          \makereferences
+          \end{document}
+          ```
+
+          ## Documentation
+
+          For detailed documentation, please refer to the GitHub repository.
+
+          ## License
+
+          This template is licensed under the LaTeX Project Public License (LPPL) version 1.3c or later.
+
+          ## Links
+
+          - GitHub: https://github.com/TJ-CSCCG/TongjiThesis
+          - Overleaf: https://www.overleaf.com/latex/templates/tongji-university-undergraduate-thesis-template/tfvdvyggqybn
+          HEREDOC
+
+          # Generate MANIFEST
+          cat > ctan/tongjithesis/MANIFEST << 'HEREDOC'
+          README.md                     # Package description and usage information
+          LICENSE                       # License information
+          tongjithesis.cls              # Main LaTeX class file
+          tongjithesis.cfg              # Configuration file
+          example/                      # Example directory
+            example.tex                 # Example thesis document
+            figures/                    # Figures directory
+              tongji.pdf               # Tongji University logo for cover
+              tongji-header.pdf        # Tongji University logo for page header
+          HEREDOC
+
+          # Generate example
+          cat > ctan/tongjithesis/example/example.tex << 'HEREDOC'
+          %!TEX program = xelatex
+          %!TEX encoding = UTF-8
+
+          \documentclass[
+            oneside,
+            degree=bachelor,
+            fullwidthstop=false,
+            fontset=fandol,
+            times=false,
+            minted=false,
+            biblatex=true,
+          ]{tongjithesis}
+
+          \tjbibresource{references.bib}
+
+          % Set thesis information
+          \school{计算机科学与技术学院}
+          \major{计算机科学与技术}
+          \student{1234567}{张三}
+          \thesistitle{基于机器学习的图像分类研究}{——以交通标志识别为例}
+          \thesistitleeng{Research on Image Classification Based on Machine Learning}{——Take Traffic Sign Recognition as an Example}
+          \thesisadvisor{李四 教授}
+          \thesisdate{2026}{4}{20}
+
+          % 信息说明页配置
+          \infotype{thesis}
+          \infoabstract{本文研究了基于机器学习的图像分类技术，并以交通标志识别为应用场景进行了实验验证。}
+          \infothesiswords{10000}
+          \infomaterials{\item 程序源代码}
+
+          \begin{document}
+
+          % Generate cover and info page
+          \MakeCover
+          \cleardoublepage
+          \MakeInfoPage
+          \cleardoublepage
+
+          % Front matter: abstract and table of contents
+          \frontmatter
+          \MakeAbstract{
+              本文研究了基于机器学习的图像分类技术，并以交通标志识别为应用场景进行了实验验证。
+              图像分类是计算机视觉中的基础任务，具有广泛的应用前景。本文首先综述了图像分类领域的经典算法和最新进展，
+              然后提出了一种改进的卷积神经网络模型用于交通标志识别。实验结果表明，所提出的方法在准确率和计算效率方面
+              均取得了良好的性能。
+          }{机器学习; 图像分类; 卷积神经网络; 交通标志识别}
+
+          % English Abstract
+          \MakeAbstractEng{
+              This paper investigates image classification techniques based on machine learning,
+              with traffic sign recognition as an application scenario for experimental validation.
+              Image classification is a fundamental task in computer vision with extensive application prospects.
+              This paper first reviews classic algorithms and recent advances in the field of image classification,
+              then proposes an improved convolutional neural network model for traffic sign recognition.
+              Experimental results demonstrate that the proposed method achieves good performance in terms of
+              accuracy and computational efficiency.
+          }{Machine Learning; Image Classification; Convolutional Neural Network; Traffic Sign Recognition}
+
+          % Table of contents
+          \clearpage
+          \tableofcontents
+          \cleardoublepage
+
+          % Main matter: thesis chapters
+          \mainmatter
+
+          \chapter{引言}
+
+          图像分类是计算机视觉中的基础任务之一，其目标是将图像分配到预定义的类别中。
+          随着深度学习技术的发展，图像分类的性能得到了显著提升。
+          本文研究基于机器学习的图像分类技术，并以交通标志识别为例进行应用研究。
+
+          \section{研究背景}
+
+          交通标志识别是自动驾驶系统的重要组成部分，它能够帮助车辆理解道路环境，遵守交通规则。
+          准确、实时的交通标志识别对于提高自动驾驶安全性具有重要意义。
+
+          % 代码示例
+          \begin{listing}[!htb]
+          \begin{minted}{python}
+          import torch
+          import torch.nn as nn
+
+          class CNN(nn.Module):
+              def __init__(self, num_classes=43):
+                  super(CNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+                  self.relu = nn.ReLU()
+                  self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+                  self.fc = nn.Linear(32 * 16 * 16, num_classes)
+
+              def forward(self, x):
+                  x = self.pool(self.relu(self.conv1(x)))
+                  x = x.view(x.size(0), -1)
+                  x = self.fc(x)
+                  return x
+
+          # 创建模型实例
+          model = CNN()
+          print(model)
+          \end{minted}
+          \caption{用于交通标志识别的简化卷积神经网络模型}
+          \label{listing:cnn}
+          \end{listing}
+
+          \chapter{结论}
+
+          本文提出了一种高效的交通标志识别方法，在准确率和计算效率方面均表现出色。
+          未来工作将探索模型的进一步轻量化，以及在嵌入式设备上的部署方案。
+
+          \makereferences
+
+          \backmatter
+          \chapter*{谢辞}
+          \addcontentsline{toc}{chapter}{谢辞}
+          感谢指导老师的悉心指导。
+
+          \end{document}
+          HEREDOC
+
+      - name: Validate CTAN package
+        run: |
+          required_files=(
+            "ctan/tongjithesis/tongjithesis.cls"
+            "ctan/tongjithesis/tongjithesis.cfg"
+            "ctan/tongjithesis/LICENSE"
+            "ctan/tongjithesis/README.md"
+            "ctan/tongjithesis/MANIFEST"
+            "ctan/tongjithesis/example/example.tex"
+            "ctan/tongjithesis/example/figures/tongji.pdf"
+            "ctan/tongjithesis/example/figures/tongji-header.pdf"
+          )
+          for file in "${required_files[@]}"; do
+            [ -f "$file" ] || { echo "Error: $file missing"; exit 1; }
+          done
+          echo "CTAN package structure:"
+          find ctan/tongjithesis -type f | sort
+
+      - name: Create source archives
+        run: |
+          EXCLUDES=(
+            .git main.pdf ctan/ _out/ _minted*
+            '*.aux' '*.log' '*.out' '*.toc' '*.bbl' '*.bcf' '*.blg'
+            '*.fls' '*.fdb_latexmk' '*.run.xml' '*.synctex.gz' '*.xdv' '*.pyg'
+            '*.tar.gz' '*.zip'
+          )
+
+          # Build tar exclude flags
+          TAR_EXCLUDES=""
+          for e in "${EXCLUDES[@]}"; do TAR_EXCLUDES="$TAR_EXCLUDES --exclude=$e"; done
+
+          # Create archives in /tmp to avoid "file changed as we read it"
+          tar -czf "/tmp/tongjithesis-source-v${PACKAGE_VERSION}.tar.gz" $TAR_EXCLUDES .
+
+          # Build zip exclude flags as array
+          ZIP_EXCLUDES=()
+          for e in "${EXCLUDES[@]}"; do ZIP_EXCLUDES+=(-x "./$e" -x "./$e/*"); done
+
+          zip -r "/tmp/tongjithesis-source-v${PACKAGE_VERSION}.zip" . "${ZIP_EXCLUDES[@]}"
+
+          # Move back to workspace
+          mv /tmp/tongjithesis-source-v${PACKAGE_VERSION}.* .
+
+          echo "Source archives created:"
+          ls -la tongjithesis-source-v${PACKAGE_VERSION}.*
+
+      - name: Create CTAN archives
+        run: |
+          cd ctan
+          tar -czf "tongjithesis-ctan-v${PACKAGE_VERSION}.tar.gz" tongjithesis/
+          zip -r "tongjithesis-ctan-v${PACKAGE_VERSION}.zip" tongjithesis/
+          echo "CTAN archives created:"
+          ls -la tongjithesis-ctan-v${PACKAGE_VERSION}.*
+
+      - name: Validate archives
+        run: |
+          # Check source archive contains key files
+          echo "Source archive contents (key files):"
+          tar -tzf "tongjithesis-source-v${PACKAGE_VERSION}.tar.gz" | grep -E "(main\.tex|style/|figures/tongji\.pdf|README\.md)" || echo "Warning: Expected files not found"
+
+          # Check source archive excludes build artifacts
+          if tar -tzf "tongjithesis-source-v${PACKAGE_VERSION}.tar.gz" | grep -E "\.(aux|log|out|toc|bbl)$"; then
+            echo "Warning: Build artifacts found in source archive"
+          else
+            echo "No build artifacts in source archive"
+          fi
+
+          # Check CTAN archive
+          echo "CTAN archive contents:"
+          tar -tzf "ctan/tongjithesis-ctan-v${PACKAGE_VERSION}.tar.gz"
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-packages-v${{ env.PACKAGE_VERSION }}
+          path: |
+            ctan/tongjithesis-ctan-v${{ env.PACKAGE_VERSION }}.tar.gz
+            ctan/tongjithesis-ctan-v${{ env.PACKAGE_VERSION }}.zip
+            tongjithesis-source-v${{ env.PACKAGE_VERSION }}.tar.gz
+            tongjithesis-source-v${{ env.PACKAGE_VERSION }}.zip
+            ctan/tongjithesis/
+          retention-days: 90
+
+  # Create GitHub release (after successful test run on a version tag, or manual dispatch)
+  release:
+    needs: package
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == format('v{0}', needs.package.outputs.version))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          if gh release view "v${PACKAGE_VERSION}" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release v${PACKAGE_VERSION} already exists. Delete it first to re-create."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download package artifacts
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-packages-v${{ env.PACKAGE_VERSION }}
+
+      - name: Download release PDFs from test workflow
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          mkdir -p release-pdfs
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            WORKFLOW_RUN_ID="${{ github.event.workflow_run.id }}"
+          else
+            WORKFLOW_RUN_ID=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow="test.yaml" \
+              --status=success \
+              --limit=1 \
+              --json databaseId \
+              --jq '.[0].databaseId' 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$WORKFLOW_RUN_ID" ] || [ "$WORKFLOW_RUN_ID" = "null" ]; then
+            echo "No successful test run found. Release PDFs will not be included."
+            echo "Tip: Run the test workflow first, then re-trigger this release."
+            exit 0
+          fi
+
+          echo "Downloading release PDFs from test run: $WORKFLOW_RUN_ID"
+          for field in science humanities; do
+            gh run download "$WORKFLOW_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "release-pdf-${field}" \
+              --dir release-pdfs 2>/dev/null || true
+          done
+          echo "Downloaded PDFs:"
+          ls -la release-pdfs/*.pdf 2>/dev/null || echo "No release PDFs found"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get previous version
+        if: steps.check.outputs.exists == 'false'
+        id: prev
+        run: |
+          PREV=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "version=${PREV#v}" >> "$GITHUB_OUTPUT"
+          echo "Previous release: ${PREV:-none}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read release template
+        if: steps.check.outputs.exists == 'false'
+        id: template
+        run: |
+          BODY=$(sed \
+            -e "s/PREV_VERSION_TOKEN/${{ steps.prev.outputs.version }}/g" \
+            -e "s/VERSION_TOKEN/$PACKAGE_VERSION/g" \
+            .github/release_template.md)
+          if [ -z "${{ steps.prev.outputs.version }}" ]; then
+            BODY=$(echo "$BODY" | sed '/PREV_VERSION_TOKEN\|完整对比\|Full changelog/d')
+          fi
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.PACKAGE_VERSION }}
+          name: "TongjiThesis v${{ env.PACKAGE_VERSION }}"
+          body: ${{ steps.template.outputs.body }}
+          files: |
+            ctan/tongjithesis-ctan-v${{ env.PACKAGE_VERSION }}.tar.gz
+            ctan/tongjithesis-ctan-v${{ env.PACKAGE_VERSION }}.zip
+            release-pdfs/TongjiThesis-v${{ env.PACKAGE_VERSION }}-science.pdf
+            release-pdfs/TongjiThesis-v${{ env.PACKAGE_VERSION }}-humanities.pdf
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: false
+          make_latest: true

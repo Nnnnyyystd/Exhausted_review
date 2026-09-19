@@ -1,0 +1,19 @@
+{
+  "name": "TongjiThesis",
+  "version": "1.4.3",
+  "description": "LaTeX template for Tongji University undergraduate thesis",
+  "author": "TJ-CSCCG",
+  "email": "TJ_CSCCG@163.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TJ-CSCCG/TongjiThesis"
+  },
+  "contributors": [
+    "YukuanHU (original author)",
+    "ganler",
+    "skyleaworlder",
+    "RizhongLin"
+  ],
+  "license": "LPPL-1.3c",
+  "private": true
+}

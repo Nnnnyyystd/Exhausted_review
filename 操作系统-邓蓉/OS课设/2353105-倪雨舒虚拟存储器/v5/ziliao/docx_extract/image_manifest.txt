@@ -1,0 +1,10 @@
+word_image_01.png	852x525	52232
+word_image_02.png	970x871	98340
+word_image_03.png	606x104	16375
+word_image_04.png	574x142	14703
+word_image_05.png	1281x319	74180
+word_image_06.png	1240x911	193098
+word_image_07.png	990x209	41412
+word_image_08.png	1537x597	132815
+word_image_09.png	1098x732	128287
+word_image_10.png	1083x282	46018
