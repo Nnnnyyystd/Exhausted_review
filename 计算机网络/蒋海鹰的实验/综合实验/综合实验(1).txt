@@ -1,0 +1,116 @@
+1. 二层交换机(S2126G)Plaintexten
+conf t
+hostname S2126
+vlan 10
+exit
+int f 0/1
+sw access vlan 10
+exit
+!聚合配置(链路聚合到三层交换机)
+int f 0/23
+port-group 1
+exit
+int f 0/24
+port-group 1
+exit
+int agg 1
+sw mode trunk
+exit
+end
+wr
+2. 三层交换机(S3760)Plaintexten
+conf t
+hostname S3760
+ip routing
+vlan 10
+exit
+vlan 20
+exit
+vlan 30
+exit
+int f 0/23
+port-group 1
+exit
+int f 0/24
+port-group 1
+exit
+int agg 1
+sw mode trunk
+exit
+int f 0/2
+sw access vlan 20
+exit
+int f 0/1
+sw access vlan 30
+exit
+int vlan 10
+ip address 192.168.152.30 255.255.255.224
+no shutdown
+exit
+int vlan 20
+ip address 192.168.152.33 255.255.255.252
+no shutdown
+exit
+int vlan 30
+ip address 192.168.152.37 255.255.255.252
+no shutdown
+exit
+router ospf
+network 192.168.152.0 0.0.0.255 area 0
+exit
+ip access-list extended 100
+permit tcp host 192.168.152.1 host 192.168.152.34 eq 21
+deny tcp any host 192.168.152.34 eq 21
+permit ip any any
+exit
+int vlan 10
+ip access-group 100 in
+exit
+service dhcp
+ip helper-address 192.168.152.38
+end
+wr
+3. 內部路由器(R1)Plaintexten
+conf t
+hostname R1_Internal
+int f 1/0
+ip address 192.168.152.38 255.255.255.252
+ip nat inside
+no shutdown
+exit
+int f 1/1
+ip address 100.10.10.1 255.255.255.0
+ip nat outside
+no shutdown
+exit
+ip route 0.0.0.0 0.0.0.0 100.10.10.2
+router ospf 1
+network 192.168.152.36 0.0.0.3 area 0
+default-information originate
+exit
+service dhcp
+ip dhcp excluded-address 192.168.152.30
+ip dhcp excluded-address 192.168.152.1
+ip dhcp pool vlan10
+network 192.168.152.0 255.255.255.224
+default-router 192.168.152.30
+dns-server 114.114.114.114
+exit
+access-list 1 permit 192.168.152.0 0.0.0.255
+ip nat inside source list 1 interface f 1/1 overload
+ip nat inside source static tcp 192.168.152.34 80 100.10.10.3 80
+end
+wr
+4. ISP 路由器(R2)Plaintexten
+conf t
+hostname R2_ISP
+int f 1/0
+ip address 100.10.10.2 255.255.255.0
+no shutdown
+exit
+int f 1/1
+ip address 200.20.20.1 255.255.255.0
+no shutdown
+exit
+end
+wr
