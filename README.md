@@ -39,7 +39,7 @@
 
 （1）详见乌龙茶：内含对考纲的分析 https://f.yourtj.de/courses/2897
 
-（2）对于网络实验可能有用的地址：https://github.com/BlossomsGarden/Computer-Network-Experiment-Cisco
+（2）对于网络实验可能有用的地址：https://github.com/BlossomsGarden/Computer-Network-Experiment-Cisco     https://github.com/Nnnnyyystd/Tongji_network_expr
 
 
 ## 4、自动机-季洪飞  
